@@ -24,6 +24,7 @@ type Client struct {
 	CertificateBase64 string
 	KeyFile           string
 	KeyBase64         string
+	DialFunction      func(address string) (net.Conn, error)
 }
 
 // BareClient can be used to set the contents of your
@@ -33,6 +34,7 @@ func BareClient(gateway, certificateBase64, keyBase64 string) (c *Client) {
 	c.Gateway = gateway
 	c.CertificateBase64 = certificateBase64
 	c.KeyBase64 = keyBase64
+	c.DialFunction = func(address string) (net.Conn, error) { return net.Dial("tcp", address) }
 	return
 }
 
@@ -43,6 +45,7 @@ func NewClient(gateway, certificateFile, keyFile string) (c *Client) {
 	c.Gateway = gateway
 	c.CertificateFile = certificateFile
 	c.KeyFile = keyFile
+	c.DialFunction = func(address string) (net.Conn, error) { return net.Dial("tcp", address) }
 	return
 }
 
@@ -100,10 +103,10 @@ func (client *Client) ConnectAndWrite(resp *PushNotificationResponse, payload []
 	gatewayParts := strings.Split(client.Gateway, ":")
 	conf := &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		ServerName: gatewayParts[0],
+		ServerName:   gatewayParts[0],
 	}
 
-	conn, err := net.Dial("tcp", client.Gateway)
+	conn, err := client.DialFunction(client.Gateway)
 	if err != nil {
 		return err
 	}
