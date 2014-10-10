@@ -49,6 +49,7 @@ func NewClient(gateway, certificateFile, keyFile string) (c *Client) {
 	return
 }
 
+
 // Send connects to the APN service and sends your push notification.
 // Remember that if the submission is successful, Apple won't reply.
 func (client *Client) Send(pn *PushNotification) (resp *PushNotificationResponse) {
@@ -128,7 +129,7 @@ func (client *Client) ConnectAndWrite(resp *PushNotificationResponse, payload []
 	// timeouts when the notification succeeds.
 	timeoutChannel := make(chan bool, 1)
 	go func() {
-		time.Sleep(time.Second * TimeoutSeconds)
+		time.Sleep(time.Millisecond * TimeoutMilliseconds)
 		timeoutChannel <- true
 	}()
 

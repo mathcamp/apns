@@ -2,7 +2,8 @@ package apns
 
 // The maximum number of seconds we're willing to wait for a response
 // from the Apple Push Notification Service.
-const TimeoutSeconds = 5
+const TimeoutMilliseconds = 500
+const TimeoutSeconds = 1
 
 // This enumerates the response codes that Apple defines
 // for push notification attempts.
