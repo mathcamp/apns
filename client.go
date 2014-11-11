@@ -2,9 +2,13 @@ package apns
 
 import (
 	"crypto/tls"
-	"errors"
 	"net"
 	"strings"
+	"appengine"
+	"sync"
+	"encoding/binary"
+	"bytes"
+	"errors"
 	"time"
 )
 
@@ -19,36 +23,205 @@ import (
 // but if you prefer you can use the CertificateBase64
 // and KeyBase64 fields to store the actual contents.
 type Client struct {
+	sync.Mutex
+
+	ctx			  appengine.Context
+
 	Gateway           string
 	CertificateFile   string
 	CertificateBase64 string
 	KeyFile           string
 	KeyBase64         string
 	DialFunction      func(address string) (net.Conn, error)
+	Closed			  bool
+
+	PushNotifCh	  chan *PushNotification
+	FailCh		  chan *PushNotificationResponse
+
+	SocketCloseCh chan struct{}
+
+	doneCh		  chan struct{}
+	apnsRespCh	  chan []byte
+
+	certificate		  tls.Certificate
+	apnsConn		*tls.Conn
+}
+
+type errResponse struct {
+	Command uint8
+	Status uint8
+	Identifier int32
 }
 
 // BareClient can be used to set the contents of your
 // certificate and key blocks manually.
-func BareClient(gateway, certificateBase64, keyBase64 string) (c *Client) {
+func BareClient(ctx appengine.Context, gateway, certificateBase64, keyBase64 string) (c *Client) {
 	c = new(Client)
+	c.ctx = ctx
 	c.Gateway = gateway
 	c.CertificateBase64 = certificateBase64
 	c.KeyBase64 = keyBase64
 	c.DialFunction = func(address string) (net.Conn, error) { return net.Dial("tcp", address) }
+	c.Closed = false
 	return
 }
 
 // NewClient assumes you'll be passing in paths that
 // point to your certificate and key.
-func NewClient(gateway, certificateFile, keyFile string) (c *Client) {
+func NewClient(ctx appengine.Context, gateway, certificateFile, keyFile string) (c *Client) {
 	c = new(Client)
+	c.ctx = ctx
 	c.Gateway = gateway
 	c.CertificateFile = certificateFile
 	c.KeyFile = keyFile
 	c.DialFunction = func(address string) (net.Conn, error) { return net.Dial("tcp", address) }
+	c.Closed = false
 	return
 }
 
+func (client *Client) Open() error {
+	if client.apnsConn == nil {
+		return client.openConnection()
+	}
+	return nil
+}
+
+func (client *Client) openConnection() error {
+	err := client.getCertificate()
+	if err != nil {
+		client.ctx.Errorf("Error getting cert: %v", err)
+		return err
+	}
+
+	gatewayParts := strings.Split(client.Gateway, ":")
+	conf := &tls.Config{
+		Certificates: []tls.Certificate{client.certificate},
+		ServerName:   gatewayParts[0],
+	}
+
+	conn, err := client.DialFunction(client.Gateway)
+	if err != nil {
+		client.ctx.Errorf("Error dialing on gateway: %v, %v", client.Gateway, err)
+		return err
+	}
+
+	tlsConn := tls.Client(conn, conf)
+	err = tlsConn.Handshake()
+	if err != nil {
+		client.ctx.Errorf("Error doing handshake: %v", err)
+		return err
+	}
+
+	client.apnsConn = tlsConn
+	client.initChans()
+
+	go client.loop()
+	return nil
+}
+
+func (client *Client) initChans() {
+	client.PushNotifCh = make(chan *PushNotification)
+	client.FailCh = make(chan *PushNotificationResponse)
+
+	client.SocketCloseCh = make(chan struct{})
+
+	client.doneCh = make(chan struct{})
+
+	client.apnsRespCh = make(chan []byte)
+}
+
+func (client *Client) Close() {
+	client.ctx.Debugf("Closing")
+
+	client.Lock()
+	defer client.Unlock()
+
+	if client.apnsConn == nil {
+		return
+	}
+	close(client.SocketCloseCh)
+	close(client.doneCh)
+	client.apnsConn.Close()
+	client.apnsConn = nil
+	client.Closed = true
+}
+
+func (client *Client) readLoop() {
+	client.ctx.Debugf("Starting read loop")
+	outter: for {
+		if client.apnsConn == nil {
+			return
+		}
+		time.Sleep(time.Millisecond * 1200)
+
+		buffer := make([]byte, 6, 6)
+		_, err := client.apnsConn.Read(buffer)
+		if err != nil {
+			client.ctx.Warningf("Got error reading apnsConn: %v, closing", err)
+			for strings.HasPrefix(err.Error(), "API error 1") {
+				time.Sleep(time.Millisecond * 100)
+				continue outter
+			}
+			client.ctx.Warningf("Closing", err)
+			client.Close()
+		}
+		client.apnsRespCh <- buffer
+	}
+}
+
+func (client *Client) loop() {
+	firstRun := false
+	for {
+		client.ctx.Infof("Next iteration is starting")
+		select {
+		case <-client.doneCh:
+			client.ctx.Debugf("DoneCh finishing up loop")
+			return
+		case pn := <-client.PushNotifCh:
+
+			// resp := client.Send(pn)
+			// client.ctx.Debugf("Sending pn got resp: %+v", resp)
+
+			client.ctx.Debugf("Got push notif from channel")
+			payload, err := pn.ToBytes()
+			if err != nil {
+				client.ctx.Errorf("Erorr serializing pn to bytes: %v", err)
+				client.Close()
+			}
+
+			client.ctx.Debugf("Writing notif to socket")
+			_, err = client.apnsConn.Write(payload)
+			if err != nil {
+				client.ctx.Warningf("1 Got error writing apnsConn: %v", err)
+				client.ctx.Warningf("Closing")
+				client.Close()
+			}
+			client.ctx.Debugf("Succeeded write")
+
+			if !firstRun {
+				firstRun = true
+				go client.readLoop()
+			}
+		case buffer := <-client.apnsRespCh:
+			client.ctx.Debugf("Got buffer from respch")
+			errRsp := &errResponse{
+				Command: uint8(buffer[0]),
+				Status:  uint8(buffer[1]),
+			}
+
+			if err := binary.Read(bytes.NewBuffer(buffer[2:]), binary.BigEndian, &errRsp.Identifier); err != nil {
+				client.ctx.Errorf("Read identifier err: %v", err)
+				return
+			}
+
+			client.ctx.Debugf("Got response of: %+v", errRsp)
+
+			resp := new(PushNotificationResponse)
+			resp.Success = false
+			client.FailCh <- resp
+		}
+	}
+}
 
 // Send connects to the APN service and sends your push notification.
 // Remember that if the submission is successful, Apple won't reply.
@@ -104,7 +277,7 @@ func (client *Client) ConnectAndWrite(resp *PushNotificationResponse, payload []
 	gatewayParts := strings.Split(client.Gateway, ":")
 	conf := &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		ServerName:   gatewayParts[0],
+		ServerName: gatewayParts[0],
 	}
 
 	conn, err := client.DialFunction(client.Gateway)
@@ -129,7 +302,7 @@ func (client *Client) ConnectAndWrite(resp *PushNotificationResponse, payload []
 	// timeouts when the notification succeeds.
 	timeoutChannel := make(chan bool, 1)
 	go func() {
-		time.Sleep(time.Millisecond * TimeoutMilliseconds)
+		time.Sleep(time.Second * TimeoutSeconds)
 		timeoutChannel <- true
 	}()
 
@@ -158,6 +331,26 @@ func (client *Client) ConnectAndWrite(resp *PushNotificationResponse, payload []
 	case <-timeoutChannel:
 		resp.Success = true
 	}
+
+	return err
+}
+
+// From: https://github.com/quexer/apns/blob/master/client.go
+// Returns a certificate to use to send the notification.
+// The certificate is only created once to save on
+// the overhead of the crypto libraries.
+func (client *Client) getCertificate() error {
+	var err error
+
+	/*if client.certificate.PrivateKey == nil {*/
+		if len(client.CertificateBase64) == 0 && len(client.KeyBase64) == 0 {
+			// The user did not specify raw block contents, so check the filesystem.
+			client.certificate, err = tls.LoadX509KeyPair(client.CertificateFile, client.KeyFile)
+		} else {
+			// The user provided the raw block contents, so use that.
+			client.certificate, err = tls.X509KeyPair([]byte(client.CertificateBase64), []byte(client.KeyBase64))
+		}
+	/*}*/
 
 	return err
 }
