@@ -167,7 +167,7 @@ func (client *Client) readLoop() {
 		buffer := make([]byte, 6, 6)
 		_, err := client.apnsConn.Read(buffer)
 		if err != nil {
-			client.ctx.Warningf("Got error reading apnsConn: %v, closing", err)
+			client.ctx.Warningf("Got error reading apnsConn: %v", err)
 			for strings.HasPrefix(err.Error(), "API error 1") {
 				time.Sleep(time.Millisecond * 100)
 				continue outter
@@ -181,7 +181,7 @@ func (client *Client) readLoop() {
 
 func (client *Client) loop() {
 	firstRun := false
-	for {
+	outer: for {
 		client.ctx.Infof("Next iteration is starting")
 		select {
 		case <-client.doneCh:
@@ -189,6 +189,10 @@ func (client *Client) loop() {
 			return
 		case pn := <-client.pushNotifCh:
 
+			if pn == nil {
+				client.ctx.Errorf("Client got nil push notification.")
+				continue outer
+			}
 			// resp := client.Send(pn)
 			// client.ctx.Debugf("Sending pn got resp: %+v", resp)
 
