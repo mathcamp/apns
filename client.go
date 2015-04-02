@@ -35,7 +35,7 @@ type Client struct {
 	DialFunction      func(address string) (net.Conn, error)
 	Closed			  bool
 
-	PushNotifCh	  chan *PushNotification
+	pushNotifCh	  chan *PushNotification
 	FailCh		  chan *PushNotificationResponse
 
 	SocketCloseCh chan struct{}
@@ -120,7 +120,7 @@ func (client *Client) openConnection() error {
 }
 
 func (client *Client) initChans() {
-	client.PushNotifCh = make(chan *PushNotification)
+	client.pushNotifCh = make(chan *PushNotification)
 	client.FailCh = make(chan *PushNotificationResponse)
 
 	client.SocketCloseCh = make(chan struct{})
@@ -141,9 +141,19 @@ func (client *Client) Close() {
 	}
 	close(client.SocketCloseCh)
 	close(client.doneCh)
+	close(client.pushNotifCh)
 	client.apnsConn.Close()
 	client.apnsConn = nil
 	client.Closed = true
+}
+
+func (client *Client) EnqueuePushNotif(pn *PushNotification) error {
+	select {
+	case client.pushNotifCh <- pn:
+		return nil
+	case <- client.doneCh:
+		return errors.New("Done channel was fired probably because client was closed.")
+	}
 }
 
 func (client *Client) readLoop() {
@@ -177,7 +187,7 @@ func (client *Client) loop() {
 		case <-client.doneCh:
 			client.ctx.Debugf("DoneCh finishing up loop")
 			return
-		case pn := <-client.PushNotifCh:
+		case pn := <-client.pushNotifCh:
 
 			// resp := client.Send(pn)
 			// client.ctx.Debugf("Sending pn got resp: %+v", resp)
