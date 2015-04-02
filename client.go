@@ -161,7 +161,13 @@ func (client *Client) readLoop() {
 		if client.apnsConn == nil {
 			return
 		}
-		time.Sleep(time.Millisecond * 1200)
+		select {
+		case <- time.Tick(time.Millisecond * 1200):
+			client.ctx.Infof("Tyring to read response from socket")
+		case <- client.doneCh:
+			client.ctx.Infof("Closing read loop as client has been closed")
+			return
+		}
 
 		buffer := make([]byte, 6, 6)
 		_, err := client.apnsConn.Read(buffer)
@@ -171,7 +177,7 @@ func (client *Client) readLoop() {
 				time.Sleep(time.Millisecond * 100)
 				continue outter
 			}
-			client.ctx.Warningf("Closing", err)
+			client.ctx.Warningf("Closing: %+v", err)
 			client.Close()
 		}
 		client.apnsRespCh <- buffer
