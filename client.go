@@ -141,7 +141,6 @@ func (client *Client) Close() {
 	}
 	close(client.SocketCloseCh)
 	close(client.doneCh)
-	close(client.pushNotifCh)
 	client.apnsConn.Close()
 	client.apnsConn = nil
 	client.Closed = true
@@ -188,7 +187,6 @@ func (client *Client) loop() {
 			client.ctx.Debugf("DoneCh finishing up loop")
 			return
 		case pn := <-client.pushNotifCh:
-
 			if pn == nil {
 				client.ctx.Errorf("Client got nil push notification.")
 				continue outer
