@@ -10,7 +10,6 @@ import (
 	"bytes"
 	"errors"
 	"time"
-	"runtime"
 	"fmt"
 )
 
