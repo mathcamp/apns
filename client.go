@@ -120,8 +120,7 @@ func (client *Client) openConnection() error {
 	tlsConn := tls.Client(conn, conf)
 	err = tlsConn.Handshake()
 	if err != nil {
-		client.ctx.Errorf("Error doing handshake: %v", err)
-		return err
+		return fmt.Errorf("Handshake err: %s", err.Error())
 	}
 
 	client.apnsConn = tlsConn
