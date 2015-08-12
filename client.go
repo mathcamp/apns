@@ -138,6 +138,7 @@ func (client *Client) Close() {
 	defer client.Unlock()
 
 	if client.apnsConn == nil {
+		client.ctx.Infof("apns connection nil so not closing any channels on client close")
 		return
 	}
 	close(client.SocketCloseCh)
@@ -162,6 +163,7 @@ func (client *Client) readLoop() {
 	client.ctx.Debugf("Starting read loop")
 	outter: for {
 		if client.apnsConn == nil {
+			client.ctx.Infof("apnsconn is nil, returning from read loop")
 			return
 		}
 		select {
