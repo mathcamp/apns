@@ -10,6 +10,8 @@ import (
 	"bytes"
 	"errors"
 	"time"
+	"runtime"
+	"fmt"
 )
 
 // Client contains the fields necessary to communicate
@@ -131,7 +133,7 @@ func (client *Client) initChans() {
 }
 
 func (client *Client) Close() {
-	client.ctx.Debugf("Closing")
+	client.ctx.Debugf("Closing %s", client.Gateway)
 
 	client.Lock()
 	defer client.Unlock()
@@ -152,6 +154,8 @@ func (client *Client) EnqueuePushNotif(pn *PushNotification) error {
 		return nil
 	case <- client.doneCh:
 		return errors.New("Done channel was fired probably because client was closed.")
+	case <- time.Tick(10 * time.Second):
+		return fmt.Errorf("Timeout trying to enqueue push notif: %+v", pn)
 	}
 }
 
@@ -177,7 +181,7 @@ func (client *Client) readLoop() {
 				time.Sleep(time.Millisecond * 100)
 				continue outter
 			}
-			client.ctx.Warningf("Closing: %+v", err)
+			client.ctx.Warningf("Closing - err: %+v", err)
 			client.Close()
 		}
 		client.apnsRespCh <- buffer
