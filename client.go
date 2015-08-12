@@ -34,7 +34,7 @@ type Client struct {
 	KeyFile           string
 	KeyBase64         string
 	DialFunction      func(address string) (net.Conn, error)
-	Closed			  bool
+	closed bool
 
 	pushNotifCh	  chan *PushNotification
 	FailCh		  chan *PushNotificationResponse
@@ -54,6 +54,7 @@ type errResponse struct {
 	Identifier int32
 }
 
+
 // BareClient can be used to set the contents of your
 // certificate and key blocks manually.
 func BareClient(ctx appengine.Context, gateway, certificateBase64, keyBase64 string) (c *Client) {
@@ -63,7 +64,7 @@ func BareClient(ctx appengine.Context, gateway, certificateBase64, keyBase64 str
 	c.CertificateBase64 = certificateBase64
 	c.KeyBase64 = keyBase64
 	c.DialFunction = func(address string) (net.Conn, error) { return net.Dial("tcp", address) }
-	c.Closed = false
+	c.closed = false
 	return
 }
 
@@ -76,8 +77,18 @@ func NewClient(ctx appengine.Context, gateway, certificateFile, keyFile string) 
 	c.CertificateFile = certificateFile
 	c.KeyFile = keyFile
 	c.DialFunction = func(address string) (net.Conn, error) { return net.Dial("tcp", address) }
-	c.Closed = false
 	return
+}
+
+func (client *Client) IsOpen() bool {
+	if client.closed {
+		return false
+	}
+	return client.apnsConn != nil
+}
+
+func (client *Client) IsClosed() bool {
+	return !client.IsOpen()
 }
 
 func (client *Client) Open() error {
@@ -115,7 +126,7 @@ func (client *Client) openConnection() error {
 
 	client.apnsConn = tlsConn
 	client.initChans()
-
+	client.closed = false
 	go client.loop()
 	return nil
 }
@@ -145,7 +156,7 @@ func (client *Client) Close() {
 	close(client.doneCh)
 	client.apnsConn.Close()
 	client.apnsConn = nil
-	client.Closed = true
+	client.closed = true
 }
 
 func (client *Client) EnqueuePushNotif(pn *PushNotification) error {
