@@ -4,7 +4,6 @@ import (
 	"crypto/tls"
 	"net"
 	"strings"
-	"appengine"
 	"sync"
 	"encoding/binary"
 	"bytes"
@@ -12,6 +11,13 @@ import (
 	"time"
 	"fmt"
 )
+
+type Logger interface {
+	Infof(format string, args ...interface{})
+	Debugf(format string, args ...interface{})
+	Warningf(format string, args ...interface{})
+	Errorf(format string, args ...interface{})
+}
 
 // Client contains the fields necessary to communicate
 // with Apple, such as the gateway to use and your
@@ -26,7 +32,7 @@ import (
 type Client struct {
 	sync.Mutex
 
-	ctx			  appengine.Context
+	log Logger
 
 	Gateway           string
 	CertificateFile   string
@@ -57,9 +63,9 @@ type errResponse struct {
 
 // BareClient can be used to set the contents of your
 // certificate and key blocks manually.
-func BareClient(ctx appengine.Context, gateway, certificateBase64, keyBase64 string) (c *Client) {
+func BareClient(log Logger, gateway, certificateBase64, keyBase64 string) (c *Client) {
 	c = new(Client)
-	c.ctx = ctx
+	c.log = log
 	c.Gateway = gateway
 	c.CertificateBase64 = certificateBase64
 	c.KeyBase64 = keyBase64
@@ -70,9 +76,9 @@ func BareClient(ctx appengine.Context, gateway, certificateBase64, keyBase64 str
 
 // NewClient assumes you'll be passing in paths that
 // point to your certificate and key.
-func NewClient(ctx appengine.Context, gateway, certificateFile, keyFile string) (c *Client) {
+func NewClient(log Logger, gateway, certificateFile, keyFile string) (c *Client) {
 	c = new(Client)
-	c.ctx = ctx
+	c.log = log
 	c.Gateway = gateway
 	c.CertificateFile = certificateFile
 	c.KeyFile = keyFile
@@ -101,7 +107,7 @@ func (client *Client) Open() error {
 func (client *Client) openConnection() error {
 	err := client.getCertificate()
 	if err != nil {
-		client.ctx.Errorf("Error getting cert: %v", err)
+		client.log.Errorf("Error getting cert: %v", err)
 		return err
 	}
 
@@ -113,7 +119,7 @@ func (client *Client) openConnection() error {
 
 	conn, err := client.DialFunction(client.Gateway)
 	if err != nil {
-		client.ctx.Errorf("Error dialing on gateway: %v, %v", client.Gateway, err)
+		client.log.Errorf("Error dialing on gateway: %v, %v", client.Gateway, err)
 		return err
 	}
 
@@ -142,13 +148,13 @@ func (client *Client) initChans() {
 }
 
 func (client *Client) Close() {
-	client.ctx.Debugf("Closing %s", client.Gateway)
+	client.log.Debugf("Closing %s", client.Gateway)
 
 	client.Lock()
 	defer client.Unlock()
 
 	if client.apnsConn == nil {
-		client.ctx.Infof("apns connection nil so not closing any channels on client close")
+		client.log.Infof("apns connection nil so not closing any channels on client close")
 		return
 	}
 	close(client.SocketCloseCh)
@@ -170,29 +176,29 @@ func (client *Client) EnqueuePushNotif(pn *PushNotification) error {
 }
 
 func (client *Client) readLoop() {
-	client.ctx.Debugf("Starting read loop")
+	client.log.Debugf("Starting read loop")
 	outter: for {
 		if client.apnsConn == nil {
-			client.ctx.Infof("apnsconn is nil, returning from read loop")
+			client.log.Infof("apnsconn is nil, returning from read loop")
 			return
 		}
 		select {
 		case <- time.Tick(time.Millisecond * 1200):
-			client.ctx.Infof("Tyring to read response from socket")
+			client.log.Infof("Tyring to read response from socket")
 		case <- client.doneCh:
-			client.ctx.Infof("Closing read loop as client has been closed")
+			client.log.Infof("Closing read loop as client has been closed")
 			return
 		}
 
 		buffer := make([]byte, 6, 6)
 		_, err := client.apnsConn.Read(buffer)
 		if err != nil {
-			client.ctx.Warningf("Got error reading apnsConn: %v", err)
+			client.log.Warningf("Got error reading apnsConn: %v", err)
 			for strings.HasPrefix(err.Error(), "API error 1") {
 				time.Sleep(time.Millisecond * 100)
 				continue outter
 			}
-			client.ctx.Warningf("Closing - err: %+v", err)
+			client.log.Warningf("Closing - err: %+v", err)
 			client.Close()
 		}
 		client.apnsRespCh <- buffer
@@ -202,52 +208,52 @@ func (client *Client) readLoop() {
 func (client *Client) loop() {
 	firstRun := false
 	outer: for {
-		client.ctx.Infof("Next iteration is starting")
+		client.log.Infof("Next iteration is starting")
 		select {
 		case <-client.doneCh:
-			client.ctx.Debugf("DoneCh finishing up loop")
+			client.log.Debugf("DoneCh finishing up loop")
 			return
 		case pn := <-client.pushNotifCh:
 			if pn == nil {
-				client.ctx.Errorf("Client got nil push notification.")
+				client.log.Errorf("Client got nil push notification.")
 				continue outer
 			}
 			// resp := client.Send(pn)
 			// client.ctx.Debugf("Sending pn got resp: %+v", resp)
 
-			client.ctx.Debugf("Got push notif from channel")
+			client.log.Debugf("Got push notif from channel")
 			payload, err := pn.ToBytes()
 			if err != nil {
-				client.ctx.Errorf("Erorr serializing pn to bytes: %v", err)
+				client.log.Errorf("Erorr serializing pn to bytes: %v", err)
 				client.Close()
 			}
 
-			client.ctx.Debugf("Writing notif to socket")
+			client.log.Debugf("Writing notif to socket")
 			_, err = client.apnsConn.Write(payload)
 			if err != nil {
-				client.ctx.Warningf("1 Got error writing apnsConn: %v", err)
-				client.ctx.Warningf("Closing")
+				client.log.Warningf("1 Got error writing apnsConn: %v", err)
+				client.log.Warningf("Closing")
 				client.Close()
 			}
-			client.ctx.Debugf("Succeeded write")
+			client.log.Debugf("Succeeded write")
 
 			if !firstRun {
 				firstRun = true
 				go client.readLoop()
 			}
 		case buffer := <-client.apnsRespCh:
-			client.ctx.Debugf("Got buffer from respch")
+			client.log.Debugf("Got buffer from respch")
 			errRsp := &errResponse{
 				Command: uint8(buffer[0]),
 				Status:  uint8(buffer[1]),
 			}
 
 			if err := binary.Read(bytes.NewBuffer(buffer[2:]), binary.BigEndian, &errRsp.Identifier); err != nil {
-				client.ctx.Errorf("Read identifier err: %v", err)
+				client.log.Errorf("Read identifier err: %v", err)
 				return
 			}
 
-			client.ctx.Debugf("Got response of: %+v", errRsp)
+			client.log.Debugf("Got response of: %+v", errRsp)
 
 			resp := new(PushNotificationResponse)
 			resp.Success = false
